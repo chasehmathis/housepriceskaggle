@@ -1,0 +1,17 @@
+---
+title: "Modeling housing prices"
+format: pdf
+author: "Chase Mathis"
+editor: visual
+---
+
+## Import Data/libraries
+
+```{r}
+#| import-data-libs
+
+
+
+```
+
+## Exploratory analysis
