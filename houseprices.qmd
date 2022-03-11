@@ -8,10 +8,126 @@ editor: visual
 ## Import Data/libraries
 
 ```{r}
-#| import-data-libs
+#| label: import-libs
 
 
+library(tidyverse)
+library(tidymodels)
+library(knitr)
+library(GGally)
+```
+
+```{r}
+#| label: import data
+test_house <- read_csv("data/test.csv")
+train_house <- read_csv("data/train.csv")
+```
+
+## Goal
+
+Create a model predicting sales price.
+
+## Selecting variables
+
+```{r}
+glimpse(train_house)
+# from: https://sebastiansauer.github.io/NAs-with-dplyr/
+train_house %>% 
+  select_if(function(x) any(is.na(x))) %>% 
+  summarise_each(funs(sum(is.na(.)))) -> extra_NA
+
+extra_NA <- pivot_longer(cols = everything(), extra_NA, values_to = 'count')
+extra_NA %>% 
+  mutate(prop = count/nrow(train_house)) %>% 
+  arrange(desc(prop)) %>% 
+  select(name, prop) %>% 
+  kable(digits = 3)
+```
+
+Looking at the columns and how many values are n/a, I am going to take out the top 5 in this table for these predictors have so many n/a values.
+
+```{r}
+#| label: remove-cols
+colum <- extra_NA %>% 
+  mutate(prop = count/nrow(train_house)) %>% 
+  arrange(desc(prop)) %>% 
+  slice_head(n = 5) %>% 
+  pull(name)
+
+train_house <- train_house %>% 
+  select(!colum)
 
 ```
 
-## Exploratory analysis
+One character has only one unique factor, which causes an error in the regression. Also n/a values should be ommited.
+
+```{r}
+lst <- train_house %>% 
+  select(where(is.character)) %>% 
+  sapply(unique)
+
+lst
+
+train_house <- train_house %>% 
+  select(!Utilities)
+```
+
+Must narrow down number of predictors. Backwards selection
+
+```{r}
+#| label: exploring potential predictors
+
+
+# must use regular stats::lm on for aic
+house_fit_0 <- lm(SalePrice ~ 1, data = train_house)
+house_fit_1 <- lm(SalePrice ~ ., data = train_house)
+
+#step_backwards <- stats::step(house_fit_1, direction = "backward")
+
+formula_back <- SalePrice ~ MSSubClass + MSZoning + LotArea + Street + LandContour + 
+    LotConfig + LandSlope + Neighborhood + Condition1 + Condition2 + 
+    BldgType + OverallQual + OverallCond + YearBuilt + RoofMatl + 
+    MasVnrType + MasVnrArea + ExterQual + BsmtQual + BsmtExposure + 
+    BsmtFinSF1 + BsmtFinSF2 + BsmtUnfSF + CentralAir + `1stFlrSF` + 
+    `2ndFlrSF` + FullBath + BedroomAbvGr + KitchenAbvGr + KitchenQual + 
+    Functional + GarageCars + GarageArea + GarageQual + GarageCond + 
+    PoolArea + SaleCondition
+```
+
+Forwards and backwards selection rendered same formula.
+
+```{r}
+good_fit <- linear_reg() %>% 
+  set_engine("lm") %>% 
+  fit(formula_back, data = train_house)
+
+good_fit %>% 
+  tidy() %>% 
+  kable(digits = 3)
+
+```
+
+## Building a recipe
+
+```{r}
+#| label: building-recipe
+
+house_rec_1 <- recipe(formula_back, data = train_house) %>%
+step_center(all_numeric_predictors()) %>% # mean center
+step_dummy(all_nominal_predictors()) %>% # dummy coding
+step_zv(all_predictors())# remove zero variance variables
+```
+
+```{r}
+#| label: workflow_specify_model
+house_spec <- linear_reg() %>% 
+  set_engine("lm")
+
+house_wflow_1 <- workflow() %>%
+add_model(house_spec) %>%
+add_recipe(house_rec_1)
+  
+
+```
+
+## 
