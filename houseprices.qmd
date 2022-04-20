@@ -12,9 +12,10 @@ editor: visual
 
 
 library(tidyverse)
+library(corrr)
 library(tidymodels)
 library(knitr)
-library(GGally)
+ggplot2::theme_set(ggplot2::theme_minimal(base_size = 16))
 ```
 
 ```{r}
@@ -27,37 +28,26 @@ train_house <- read_csv("data/train.csv")
 
 Create a model predicting sales price.
 
+## EDA
+
+```{r}
+#| label: looking-at-response-variable
+
+
+train_house %>% 
+  ggplot(aes(x = SalePrice)) + 
+  geom_histogram(bins = 25)
+
+summary(train_house$SalePrice) %>% 
+  tidy() %>% 
+  kable()
+
+
+```
+
 ## Selecting variables
 
-```{r}
-glimpse(train_house)
-# from: https://sebastiansauer.github.io/NAs-with-dplyr/
-train_house %>% 
-  select_if(function(x) any(is.na(x))) %>% 
-  summarise_each(funs(sum(is.na(.)))) -> extra_NA
-
-extra_NA <- pivot_longer(cols = everything(), extra_NA, values_to = 'count')
-extra_NA %>% 
-  mutate(prop = count/nrow(train_house)) %>% 
-  arrange(desc(prop)) %>% 
-  select(name, prop) %>% 
-  kable(digits = 3)
-```
-
 Looking at the columns and how many values are n/a, I am going to take out the top 5 in this table for these predictors have so many n/a values.
-
-```{r}
-#| label: remove-cols
-colum <- extra_NA %>% 
-  mutate(prop = count/nrow(train_house)) %>% 
-  arrange(desc(prop)) %>% 
-  slice_head(n = 5) %>% 
-  pull(name)
-
-train_house <- train_house %>% 
-  select(!colum)
-
-```
 
 One character has only one unique factor, which causes an error in the regression. Also n/a values should be ommited.
 
@@ -66,68 +56,158 @@ lst <- train_house %>%
   select(where(is.character)) %>% 
   sapply(unique)
 
-lst
 
 train_house <- train_house %>% 
   select(!Utilities)
+
+train_house %>% 
+  correlate() %>% 
+  select(term,SalePrice) %>% 
+  arrange(desc(SalePrice)) %>% 
+  top_n(5) %>% 
+  select(term)
+
 ```
 
-Must narrow down number of predictors. Backwards selection
+## Modeling
 
 ```{r}
-#| label: exploring potential predictors
+#| label: specify-model
 
-
-# must use regular stats::lm on for aic
-house_fit_0 <- lm(SalePrice ~ 1, data = train_house)
-house_fit_1 <- lm(SalePrice ~ ., data = train_house)
-
-#step_backwards <- stats::step(house_fit_1, direction = "backward")
-
-formula_back <- SalePrice ~ MSSubClass + MSZoning + LotArea + Street + LandContour + 
-    LotConfig + LandSlope + Neighborhood + Condition1 + Condition2 + 
-    BldgType + OverallQual + OverallCond + YearBuilt + RoofMatl + 
-    MasVnrType + MasVnrArea + ExterQual + BsmtQual + BsmtExposure + 
-    BsmtFinSF1 + BsmtFinSF2 + BsmtUnfSF + CentralAir + `1stFlrSF` + 
-    `2ndFlrSF` + FullBath + BedroomAbvGr + KitchenAbvGr + KitchenQual + 
-    Functional + GarageCars + GarageArea + GarageQual + GarageCond + 
-    PoolArea + SaleCondition
+house_spec <- linear_reg() %>%
+  set_engine("lm")
 ```
 
-Forwards and backwards selection rendered same formula.
+### Model 1
 
 ```{r}
-good_fit <- linear_reg() %>% 
-  set_engine("lm") %>% 
-  fit(formula_back, data = train_house)
+#| label: model-1-recipe
 
-good_fit %>% 
+house_rec_1 <- recipe(SalePrice ~ OverallQual + GrLivArea + GarageCars + GarageArea + TotalBsmtSF, data = train_house) %>%
+  step_corr(removals = TRUE) %>% # removes variables with correlation above 0.9
+step_center(all_numeric_predictors()) %>% # mean center
+step_dummy(all_nominal_predictors()) %>% # dummy coding
+step_zv(all_predictors())# remove zero variance variables
+
+```
+
+```{r}
+#| label: model-1-wflow
+
+house_wflow1 <- workflow() %>%
+  add_model(house_spec) %>%
+  add_recipe(house_rec_1)
+
+```
+
+```{r}
+#| label: fit-model-1
+
+house_fit_1 <- house_wflow1 %>% 
+  fit(train_house) 
+
+house_fit_1%>% 
   tidy() %>% 
   kable(digits = 3)
 
 ```
 
-## Building a recipe
+### Model 2
+
+Only first 3 variables
 
 ```{r}
-#| label: building-recipe
+#| label: model-2-recipe
 
-house_rec_1 <- recipe(formula_back, data = train_house) %>%
+house_rec_2 <- recipe(SalePrice ~ OverallQual + GrLivArea + GarageCars, data = train_house) %>%
+  step_corr(removals = TRUE) %>% # removes variables with correlation above 0.9
 step_center(all_numeric_predictors()) %>% # mean center
 step_dummy(all_nominal_predictors()) %>% # dummy coding
 step_zv(all_predictors())# remove zero variance variables
+
 ```
 
 ```{r}
-#| label: workflow_specify_model
-house_spec <- linear_reg() %>% 
-  set_engine("lm")
+#| label: model-2-wflow
 
-house_wflow_1 <- workflow() %>%
-add_model(house_spec) %>%
-add_recipe(house_rec_1)
-  
+house_wflow2 <- workflow() %>%
+  add_model(house_spec) %>%
+  add_recipe(house_rec_2)
 
 ```
 
-## 
+```{r}
+#| label: fit-model-2
+
+house_fit_2 <- house_wflow2 %>% 
+  fit(train_house) 
+
+house_fit_2%>% 
+  tidy() %>% 
+  kable(digits = 3)
+
+```
+
+### Model 3... Interaction Terms?
+
+```{r}
+#| label: model-3-recipe
+house_rec_3 <- recipe(SalePrice ~ OverallQual + GrLivArea + GarageCars + Id, data = train_house) %>%
+  update_role(Id, new_role = "id variable") %>%
+  step_interact(terms = ~ OverallQual:GrLivArea +OverallQual:GarageCars + GrLivArea:GarageCars) %>% 
+  step_corr(removals = TRUE) %>% # removes variables with correlation above 0.9
+step_center(all_numeric_predictors()) %>% # mean center
+step_dummy(all_nominal_predictors()) %>% # dummy coding
+step_zv(all_predictors())# remove zero variance variables
+
+house_rec_3
+```
+
+```{r}
+#| label: model-3-wflow
+
+house_wflow3 <- workflow() %>%
+  add_model(house_spec) %>%
+  add_recipe(house_rec_3)
+```
+
+```{r}
+#| label: fit-model-3
+
+house_fit_3 <- house_wflow3 %>% 
+  fit(train_house) 
+
+house_fit_3%>% 
+  tidy() %>% 
+  kable(digits = 3)
+```
+
+## Model Evaluation
+
+```{r}
+#| label: Evaluate-model-1
+
+glance(house_fit_1) %>% 
+  select(r.squared,adj.r.squared,AIC)
+
+glance(house_fit_2) %>% 
+  select(r.squared,adj.r.squared,AIC)
+
+glance(house_fit_3) %>% 
+  select(r.squared,adj.r.squared,AIC)
+```
+
+Model 3 has the highest adj.r.squared of 0.788 and the lowest AIC. We will choose this model.
+
+```{r}
+#| label: create-and-export-dataframe
+
+house_aug <- augment(house_fit_3, new_data = test_house) %>% 
+  select(Id, .pred) %>% 
+  rename(SalePrice = .pred) %>% 
+  mutate(SalePrice = if_else(is.na(SalePrice), mean(SalePrice, na.rm = TRUE), SalePrice))
+
+write_csv(house_aug, "houseprices_files/submit.csv")
+```
+
+Issue with this row as Garage Cars have an n/a value. As we have already modeled our data using the test data, we will return the na value with the mean sale price.
